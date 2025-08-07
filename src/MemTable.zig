@@ -88,32 +88,40 @@ pub fn put(self: *MemTable, key: []const u8, val: []const u8, opts: PutOptions) 
         try self.writeToWal(entry);
     }
 
-    const pos = self.findInsertPosition(key);
+    const search = self.binSearch(key);
 
-    std.mem.copyBackwards(Entry, self.entries[pos + 1 .. self.count + 1], self.entries[pos..self.count]);
-
-    self.entries[pos] = entry;
-    self.count += 1;
+    if (!search.found) {
+        std.mem.copyBackwards(
+            Entry,
+            self.entries[search.pos + 1 .. self.count + 1],
+            self.entries[search.pos..self.count],
+        );
+        self.entries[search.pos] = entry;
+        self.count += 1;
+    } else {
+        // replace
+        self.entries[search.pos] = entry;
+    }
 
     std.debug.print("mem used: {d}/{d}\n", .{ self.fba.end_index, self.fba.buffer.len });
 }
 
-fn findInsertPosition(self: *MemTable, key: []const u8) usize {
-    var left: usize = 0;
-    var right: usize = self.count;
-    while (left < right) {
-        const mid = (left + right) / 2;
-        const cmp = std.mem.order(u8, key, self.entries[mid].key);
-        if (cmp == .lt) {
-            right = mid;
-        } else {
-            left = mid + 1;
-        }
+pub fn get(self: *MemTable, key: []const u8, buf: []u8) !?[]u8 {
+    const search = self.binSearch(key);
+    if (search.found) {
+        const entry = self.entries[search.pos];
+        std.mem.copyForwards(u8, buf, entry.val);
+        return buf[0..entry.val.len];
     }
-    return left;
+    return null;
 }
 
-pub fn get(self: *MemTable, key: []const u8, buf: []u8) !?[]u8 {
+pub const SearchResult = struct {
+    pos: usize,
+    found: bool,
+};
+
+fn binSearch(self: *MemTable, key: []const u8) SearchResult {
     var left: usize = 0;
     var right: usize = self.count;
     while (left < right) {
@@ -123,13 +131,17 @@ pub fn get(self: *MemTable, key: []const u8, buf: []u8) !?[]u8 {
             .lt => right = mid,
             .gt => left = mid + 1,
             .eq => {
-                const val = self.entries[mid].val;
-                std.mem.copyForwards(u8, buf, val);
-                return buf[0..val.len];
+                return SearchResult{
+                    .pos = mid,
+                    .found = true,
+                };
             },
         }
     }
-    return null;
+    return SearchResult{
+        .pos = left,
+        .found = false,
+    };
 }
 
 test "put entries" {
@@ -151,6 +163,11 @@ test "put entries" {
 
     const val2 = try mt.get("baz", valBuf);
     try std.testing.expectEqualSlices(u8, "luhrmann", val2.?);
+
+    // Update value of a key
+    try mt.put("foo", "bing", .{});
+    const val3 = try mt.get("foo", valBuf);
+    try std.testing.expectEqualSlices(u8, "bing", val3.?);
 }
 
 const std = @import("std");
