@@ -31,7 +31,11 @@ pub fn init(buf: []u8, opts: Options) !MemTable {
         .wal = wal,
     };
 
-    try mt.replayWal();
+    mt.replayWal() catch |err| switch (err) {
+        error.EndOfStream => {},
+        error.NotOpenForReading => {},
+        else => return err,
+    };
 
     return mt;
 }
@@ -62,11 +66,17 @@ fn replayWal(self: *MemTable) !void {
 
         std.debug.print("replay {s} => {s}\n", .{ key, val });
 
-        try self.put(key, val);
+        try self.put(key, val, .{
+            .skipWal = true,
+        });
     }
 }
 
-pub fn put(self: *MemTable, key: []const u8, val: []const u8) !void {
+pub const PutOptions = struct {
+    skipWal: bool = false,
+};
+
+pub fn put(self: *MemTable, key: []const u8, val: []const u8, opts: PutOptions) !void {
     if (self.count >= self.entries.len)
         return error.MemTableFull;
 
@@ -74,7 +84,9 @@ pub fn put(self: *MemTable, key: []const u8, val: []const u8) !void {
     const v = try self.fba.allocator().dupe(u8, val);
     const entry = Entry{ .key = k, .val = v };
 
-    try self.writeToWal(entry);
+    if (!opts.skipWal) {
+        try self.writeToWal(entry);
+    }
 
     const pos = self.findInsertPosition(key);
 
@@ -128,8 +140,8 @@ test "put entries" {
         .walPath = "/tmp/wal",
     });
 
-    try mt.put("foo", "bar");
-    try mt.put("baz", "luhrmann");
+    try mt.put("foo", "bar", .{});
+    try mt.put("baz", "luhrmann", .{});
 
     const valBuf = try std.testing.allocator.alloc(u8, 32);
     defer std.testing.allocator.free(valBuf);
